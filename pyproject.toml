@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meeting-summarizer"
+version = "0.1.0"
+description = "Summarize meeting PDFs using poppler-utils and OpenAI/Gemini APIs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "python-dotenv>=1.0.1",
+  "requests>=2.32.0",
+]
+
+[project.scripts]
+meeting-summarizer = "meeting_summarizer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
