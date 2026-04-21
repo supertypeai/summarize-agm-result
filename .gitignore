@@ -9,3 +9,4 @@ v/
 .env
 *.log
 output/
+/ignore
