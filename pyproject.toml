@@ -9,8 +9,9 @@ description = "Summarize meeting PDFs using poppler-utils and OpenAI/Gemini APIs
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "python-dotenv>=1.0.1",
-  "requests>=2.32.0",
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.0",
+    "supabase>=2.0.0",
 ]
 
 [project.scripts]
