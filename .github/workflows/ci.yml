@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      idx_max_new:
+        description: "Max new IDX announcements to process"
+        required: false
+        default: "1"
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies (Poppler, Tesseract, OCRmyPDF)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-ind ocrmypdf
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Verify OCR binaries
+        run: |
+          pdftotext -v
+          pdftoppm -v
+          tesseract --version
+          ocrmypdf --version
+
+      - name: Smoke check package import
+        run: |
+          python -c "import meeting_summarizer; print(meeting_summarizer.__version__)"
+          python -m meeting_summarizer.cli --help
+
+      - name: Restore IDX seen cache
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache/restore@v4
+        with:
+          path: seen_announcements.json
+          key: idx-seen-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            idx-seen-${{ runner.os }}-
+
+      - name: Check API key for IDX run
+        id: check_api_key
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -n "$GEMINI_API_KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "GEMINI_API_KEY is not configured. Skipping IDX run."
+          fi
+
+      - name: Run IDX summarization
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.check_api_key.outputs.has_key == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          SUMMARY_CHUNK_CHARS: "12000"
+          SUMMARY_TEMPERATURE: "0.2"
+          OCR_LANG: "eng+ind"
+          OCR_ENGINE: "ocrmypdf"
+        run: |
+          mkdir -p output
+          IDX_MAX_NEW="1"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.idx_max_new }}" ]; then
+            IDX_MAX_NEW="${{ inputs.idx_max_new }}"
+          fi
+          python -m meeting_summarizer.cli --from-idx --agms --api gemini --idx-max-new "$IDX_MAX_NEW" --output output
+
+      - name: Save IDX seen cache
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.check_api_key.outputs.has_key == 'true' && hashFiles('seen_announcements.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: seen_announcements.json
+          key: idx-seen-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Upload summary artifact
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.check_api_key.outputs.has_key == 'true' && hashFiles('output/*.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: meeting-summary
+          path: output/*.json
