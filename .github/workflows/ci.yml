@@ -81,7 +81,8 @@ jobs:
           OCR_ENGINE: "ocrmypdf"
         run: |
           mkdir -p output
-          python -m meeting_summarizer.cli --from-idx --agms --api gemini --output output
+          SINCE_DATE="$(date -u -d 'yesterday' +%F)"
+          python -m meeting_summarizer.cli --from-idx --agms --api gemini --idx-since "$SINCE_DATE" --output output
 
       - name: Save IDX seen cache
         if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.check_api_key.outputs.has_key == 'true' && hashFiles('seen_announcements.json') != ''
