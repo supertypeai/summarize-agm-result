@@ -425,7 +425,7 @@ AGM summary:
         )
 
         try:
-            with request.urlopen(req, timeout=120) as res:
+            with request.urlopen(req, timeout=240) as res:
                 body = res.read().decode("utf-8")
         except HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
@@ -474,7 +474,7 @@ AGM summary:
         )
 
         try:
-            with request.urlopen(req, timeout=120) as res:
+            with request.urlopen(req, timeout=240) as res:
                 body = res.read().decode("utf-8")
         except HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")

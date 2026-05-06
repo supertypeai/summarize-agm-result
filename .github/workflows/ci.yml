@@ -5,7 +5,8 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 0 * 4-6 *"
+    - cron: "0 0 * 1-3,7-12 1"
   workflow_dispatch:
 
 jobs:
@@ -82,7 +83,7 @@ jobs:
         run: |
           mkdir -p output
           SINCE_DATE="$(date -u -d 'yesterday' +%F)"
-          python -m meeting_summarizer.cli --from-idx --agms --api gemini --idx-since "$SINCE_DATE" --output output
+          python -m meeting_summarizer.cli --from-idx --agms --api gemini --idx-since "$SINCE_DATE" --output output --upsert
 
       - name: Save IDX seen cache
         if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.check_api_key.outputs.has_key == 'true' && hashFiles('seen_announcements.json') != ''
