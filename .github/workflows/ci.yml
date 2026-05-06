@@ -73,6 +73,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           IDX_PROXY_URL: ${{ secrets.IDX_PROXY_URL }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
           IDX_VERIFY_SSL: "true"
