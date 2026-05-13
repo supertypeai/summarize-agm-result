@@ -1,0 +1,51 @@
+1. Buyback
+   - buyback, treasury shares/stock
+
+2. Dividend
+   - cash dividend, dividend, bonus shares
+
+3. Rights Issue
+   - rights issue, warrants
+
+4. Capital & Equity
+   - capital increase/reduction/structure/utilization, authorized capital
+   - share issuance/sale, stock split, stock options
+   - private placement, public offering, ipo proceeds, secondary listing
+   - shareholder composition/structure
+
+5. Debt & Credit
+   - credit agreement, loan facility, debt conversion/settlement
+   - bond proceeds, corporate guarantee, asset guarantee/pledge
+
+6. Acquisition & Investment
+   - acquisition, divestment, asset disposal/sale
+   - investment, equity investment, material transaction
+
+7. Board & Management
+   - board/commissioner/director appointment, dismissal, resignation,
+     remuneration, authority, composition, duties, discharge, restructuring
+   - management change, discharge, representation
+   - pension fund, remuneration
+
+8. Financial Reporting & Profit Allocation
+   - financial statements, annual report, net profit, income allocation
+   - profit allocation/utilization, fund allocation/usage/utilization
+   - retained earnings, reserve fund/reserves
+   - proceeds revision/use/utilization, working capital
+
+9. Corporate Governance
+   - general meeting, agm delay, meeting minutes, articles amendment
+   - notarial deed, legal/administrative authorization
+   - liability discharge, discharge, corporate plan
+   - recovery plan, sustainable finance, sharia board
+
+10. Administrative & Other
+    - name change, domicile change, address change, office relocation
+    - kbli compliance, business activities/expansion/plan
+    - work plan, feasibility study
+
+Additional mapping signals:
+- Board and management: director appointment, commissioner appointment, remuneration, discharge
+- Financial reporting and profit allocation: annual report, financial statements, net profit, reserves
+- Corporate governance: auditor appointment
+- Capital and equity: ipo proceeds

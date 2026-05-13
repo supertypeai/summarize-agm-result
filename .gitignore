@@ -10,3 +10,6 @@ v/
 *.log
 output/
 /ignore
+/input
+/input2
+/pubex

@@ -12,6 +12,7 @@ import requests
 import urllib3
 
 from .config import IdxSettings
+from .pdf import extract_text_from_pdf
 
 _HEADERS = {
     "User-Agent": (
@@ -69,13 +70,23 @@ def fetch_announcements(
 
         title = str(item.get("Title") or item.get("Judul") or "").strip()
         date = str(item.get("PublishDate") or item.get("Date") or item.get("Tanggal") or "").strip()
-        company = str(
-            item.get("Code") or item.get("EmitenCode") or item.get("StockCode") or ""
-        ).strip()
-
         link = _extract_attachment_link(
             item.get("Attachments"),
             summary_mode=summary_mode,
+        )
+        company = _extract_company_code(
+            item.get("Code"),
+            item.get("EmitenCode"),
+            item.get("StockCode"),
+            item.get("CompanyCode"),
+            item.get("TickerCode"),
+            item.get("Ticker"),
+            item.get("Symbol"),
+            item.get("KodeEmiten"),
+            item.get("KodeSaham"),
+            item.get("Company"),
+            title,
+            link,
         )
 
         ann_id = str(
@@ -123,14 +134,14 @@ def filter_keyword(announcements: list[dict[str, str]], keyword: str) -> list[di
 
 def filter_company(announcements: list[dict[str, str]], company: str) -> list[dict[str, str]]:
     """Return announcements matching company code with substring/wildcard support."""
-    normalized = company.strip()
-    if not normalized:
+    normalized_pattern = _normalize_company_filter_pattern(company)
+    if not normalized_pattern:
         return announcements
 
     matches: list[dict[str, str]] = []
     for announcement in announcements:
-        value = str(announcement.get("company", ""))
-        if _matches_pattern(value, normalized):
+        company_values = _company_filter_values(announcement.get("company", ""))
+        if any(_matches_pattern(value, normalized_pattern) for value in company_values):
             matches.append(announcement)
     return matches
 
@@ -140,14 +151,22 @@ def filter_companies(
     companies: list[str],
 ) -> list[dict[str, str]]:
     """Return announcements matching any provided company filter."""
-    normalized = [value.strip() for value in companies if value.strip()]
-    if not normalized:
+    normalized_patterns: list[str] = []
+    for value in companies:
+        normalized = _normalize_company_filter_pattern(value)
+        if normalized:
+            normalized_patterns.append(normalized)
+    if not normalized_patterns:
         return announcements
 
     matches: list[dict[str, str]] = []
     for announcement in announcements:
-        value = str(announcement.get("company", ""))
-        if any(_matches_pattern(value, pattern) for pattern in normalized):
+        company_values = _company_filter_values(announcement.get("company", ""))
+        if any(
+            _matches_pattern(value, pattern)
+            for pattern in normalized_patterns
+            for value in company_values
+        ):
             matches.append(announcement)
     return matches
 
@@ -159,6 +178,13 @@ def parse_announcement_date(raw_date: str | None) -> date | None:
     value = str(raw_date).strip()
     if not value:
         return None
+
+    epoch_match = re.search(r"/Date\((\d+)\)/", value)
+    if epoch_match:
+        try:
+            return datetime.fromtimestamp(int(epoch_match.group(1)) / 1000).date()
+        except ValueError:
+            pass
 
     normalized = value.replace("Z", "+00:00")
     try:
@@ -174,13 +200,46 @@ def parse_announcement_date(raw_date: str | None) -> date | None:
     except ValueError:
         pass
 
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y"):
-        try:
-            return datetime.strptime(value, fmt).date()
-        except ValueError:
-            continue
+    compact = re.sub(r"\s+", " ", value).strip()
+    translated = _translate_indonesian_months(compact)
+
+    for candidate in (compact, translated):
+        for fmt in (
+            "%d-%m-%Y",
+            "%d/%m/%Y",
+            "%d.%m.%Y",
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%d %b %Y",
+            "%d %B %Y",
+        ):
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
 
     return None
+
+
+def _translate_indonesian_months(value: str) -> str:
+    month_map = {
+        "januari": "January",
+        "februari": "February",
+        "maret": "March",
+        "april": "April",
+        "mei": "May",
+        "juni": "June",
+        "juli": "July",
+        "agustus": "August",
+        "september": "September",
+        "oktober": "October",
+        "november": "November",
+        "desember": "December",
+    }
+    translated = value
+    for indo, english in month_map.items():
+        translated = re.sub(rf"\b{indo}\b", english, translated, flags=re.IGNORECASE)
+    return translated
 
 
 def filter_by_date_range(
@@ -238,9 +297,9 @@ def download_pdf(
 ) -> Path:
     """Download an announcement PDF to target_dir and return local file path."""
     if summary_mode == "pubex":
-        pubex_path = _download_best_pubex_pdf(announcement, target_dir, settings)
-        if pubex_path is not None:
-            return pubex_path
+        pubex_paths = download_pubex_pdfs(announcement, target_dir, settings, limit=1)
+        if pubex_paths:
+            return pubex_paths[0]
 
     link = announcement.get("link", "").strip()
     if not link:
@@ -252,6 +311,104 @@ def download_pdf(
         settings=settings,
         announcement=announcement,
     )
+
+
+def download_pubex_pdfs(
+    announcement: dict[str, str],
+    target_dir: Path,
+    settings: IdxSettings,
+    limit: int = 2,
+) -> list[Path]:
+    """Download and rank PubEx attachments, returning top-N by pages/size."""
+    if limit < 1:
+        raise RuntimeError("limit must be >= 1")
+
+    candidates = _extract_attachment_pdf_candidates(announcement.get("attachments"))
+    if not candidates:
+        link = announcement.get("link", "").strip()
+        if not link:
+            return []
+        return [
+            _download_pdf_link(
+                link=link,
+                target_dir=target_dir,
+                settings=settings,
+                announcement=announcement,
+            )
+        ]
+
+    scored: list[tuple[int, int, int, Path]] = []
+    for index, (link, attachment) in enumerate(candidates, start=1):
+        path = _download_pdf_link(
+            link=link,
+            target_dir=target_dir,
+            settings=settings,
+            announcement=announcement,
+            ordinal=index,
+        )
+        size_bytes = path.stat().st_size
+        page_count = _read_pdf_page_count(path)
+        lampiran_score = int(_looks_like_lampiran_attachment(link, attachment))
+        scored.append((page_count, size_bytes, lampiran_score, path))
+
+    # Prioritize most pages, then larger size; lampiran-like names are tie-breakers.
+    scored.sort(key=lambda item: (item[0], item[1], item[2], item[3].name), reverse=True)
+    return [item[3] for item in scored[:limit]]
+
+
+def download_pubex_pdf_for_role(
+    announcement: dict[str, str],
+    target_dir: Path,
+    settings: IdxSettings,
+    role: Literal["qna", "company_update"],
+) -> Path:
+    candidates = _extract_attachment_pdf_candidates(announcement.get("attachments"))
+    if not candidates:
+        link = announcement.get("link", "").strip()
+        if not link:
+            raise RuntimeError(f"Announcement has no attachment link: {announcement.get('id', '')}")
+        return _download_pdf_link(
+            link=link,
+            target_dir=target_dir,
+            settings=settings,
+            announcement=announcement,
+        )
+
+    scored: list[tuple[tuple[int, int, int, int], Path]] = []
+    for index, (link, attachment) in enumerate(candidates, start=1):
+        path = _download_pdf_link(
+            link=link,
+            target_dir=target_dir,
+            settings=settings,
+            announcement=announcement,
+            ordinal=index,
+        )
+        size_bytes = path.stat().st_size
+        page_count = _read_pdf_page_count(path)
+        lampiran_score = int(_looks_like_lampiran_attachment(link, attachment))
+        if role == "company_update":
+            # Company Update file is expected to be the largest/page-rich document.
+            score = (page_count, size_bytes, lampiran_score, 0)
+            print(
+                "PubEx CompanyUpdate candidate: "
+                f"{path.name} -> points={score} (pages={page_count}, size={size_bytes}, lampiran={lampiran_score})"
+            )
+        else:
+            # QnA selection is text-driven only (download -> extract text -> count qna_signals).
+            extracted_text = _extract_pdf_text_for_debug(path)
+            text_hits = _pubex_qna_signal_hits_in_text(extracted_text)
+            keyword_score = len(text_hits)
+            score = (keyword_score, 0, 0, 0)
+            text_display = ", ".join(text_hits) if text_hits else "none"
+            print(
+                "PubEx QnA candidate: "
+                f"{path.name} -> text_hits=[{text_display}], points={score}"
+            )
+        scored.append((score, path))
+
+    scored.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+    print(f"PubEx selected {role} PDF: {scored[0][1].name}")
+    return scored[0][1]
 
 
 def _download_pdf_link(
@@ -290,35 +447,6 @@ def _download_pdf_link(
         raise RuntimeError(f"Downloaded file is empty: {destination}")
 
     return destination
-
-
-def _download_best_pubex_pdf(
-    announcement: dict[str, str],
-    target_dir: Path,
-    settings: IdxSettings,
-) -> Path | None:
-    candidates = _extract_attachment_pdf_candidates(announcement.get("attachments"))
-    if not candidates:
-        return None
-
-    scored: list[tuple[int, int, int, int, Path]] = []
-    for index, (link, attachment) in enumerate(candidates, start=1):
-        path = _download_pdf_link(
-            link=link,
-            target_dir=target_dir,
-            settings=settings,
-            announcement=announcement,
-            ordinal=index,
-        )
-        size_bytes = path.stat().st_size
-        page_count = _read_pdf_page_count(path)
-        lampiran_score = int(_looks_like_lampiran_attachment(link, attachment))
-        threshold_score = int(size_bytes > (1024 * 1024) or page_count >= 5)
-        scored.append((lampiran_score, threshold_score, page_count, size_bytes, path))
-
-    # Prefer lampiran attachments, then size/page threshold, then more pages/larger file.
-    scored.sort(reverse=True)
-    return scored[0][4]
 
 
 def _build_proxies(proxy_url: str | None) -> dict[str, str] | None:
@@ -480,6 +608,28 @@ def _looks_like_lampiran_attachment(path: str, attachment: dict[str, object]) ->
     return "lampiran" in combined or re.search(r"\blamp\d*\b", combined) is not None
 
 
+def _pubex_qna_signal_hits_in_text(text: str) -> list[str]:
+    normalized = text.lower()
+    qna_signals = (
+        "qna",
+        "q&a",
+        "tanya jawab",
+        "pertanyaan",
+        "jawaban",
+        "question",
+        "answer",
+        "risalah",
+    )
+    return [signal for signal in qna_signals if signal in normalized]
+
+
+def _extract_pdf_text_for_debug(pdf_path: Path) -> str:
+    try:
+        return extract_text_from_pdf(pdf_path)
+    except RuntimeError:
+        return ""
+
+
 def _extract_attachment_size_bytes(attachment: dict[str, object]) -> int:
     for key in ("FileSizeBytes", "FileSize", "SizeBytes", "Size", "DocumentSize"):
         parsed = _parse_size_bytes(attachment.get(key))
@@ -598,6 +748,76 @@ def _sanitize_filename(value: str) -> str:
     cleaned = re.sub(r"[<>:\"/\\|?*\x00-\x1F]+", "_", value).strip(" .")
     cleaned = re.sub(r"\s+", "_", cleaned)
     return cleaned[:180]
+
+
+def _extract_company_code(*candidates: object) -> str:
+    for candidate in candidates:
+        normalized = _normalize_company_code(candidate)
+        if normalized:
+            return normalized
+
+    for candidate in candidates:
+        extracted = _extract_company_code_from_text(str(candidate or ""))
+        if extracted:
+            return extracted
+    return ""
+
+
+def _normalize_company_code(value: object) -> str:
+    raw = str(value or "").strip().upper().removesuffix(".JK")
+    if re.fullmatch(r"[A-Z]{4}", raw):
+        return raw
+    match = re.search(r"\b([A-Z]{4})\b", raw)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _normalize_company_filter_pattern(value: str) -> str:
+    normalized = value.strip().upper()
+    if not normalized:
+        return ""
+    return normalized.removesuffix(".JK")
+
+
+def _company_filter_values(value: object) -> list[str]:
+    raw = str(value or "").strip()
+    values = [raw.upper()] if raw else []
+
+    normalized = _normalize_company_code(raw)
+    if normalized:
+        values.append(normalized)
+
+    extracted = _extract_company_code_from_text(raw)
+    if extracted:
+        values.append(extracted)
+
+    if not values:
+        return [""]
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(values))
+
+
+def _extract_company_code_from_text(value: str) -> str:
+    if not value:
+        return ""
+
+    for pattern in (
+        r"^\s*([A-Z]{4})\b",
+        r"\b([A-Z]{4})\s*[-–—]",
+        r"\(([A-Z]{4})\)",
+        r"\b([A-Z]{4})\.JK\b",
+        r"\b\d{8}_([A-Z]{4})_",
+        r"\b(KODE\s+(?:EMITEN|SAHAM)|STOCK\s+CODE|TICKER|SYMBOL)\s*[:\-]?\s*([A-Z]{4})\b",
+    ):
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = match.group(1) if match.lastindex == 1 else match.group(2)
+        normalized = _normalize_company_code(candidate)
+        if normalized:
+            return normalized
+    return ""
 
 
 def _matches_pattern(value: str, pattern: str) -> bool:

@@ -203,8 +203,7 @@ class MeetingSummarizer:
                 "date": meeting_date,
                 "summary": clean_summary,
             }
-            if normalized_doc_type == "agms":
-                payload["tags"] = self._extract_agms_tags(clean_summary, company_name)
+            payload["tags"] = self.extract_tags(clean_summary, transcript=transcript)
             return json.dumps(
                 payload,
                 ensure_ascii=False,
@@ -225,12 +224,18 @@ class MeetingSummarizer:
             "date": meeting_date,
             "summary": clean_summary,
         }
-        if normalized_doc_type == "agms":
-            payload["tags"] = self._extract_agms_tags(clean_summary, company_name)
+        payload["tags"] = self.extract_tags(clean_summary, transcript=transcript)
         return json.dumps(
             payload,
             ensure_ascii=False,
         )
+
+    def extract_tags(self, summary_text: str, transcript: str = "") -> list[str]:
+        clean_summary = str(summary_text).strip()
+        if not clean_summary:
+            return []
+        company_name = extract_company_name(transcript)
+        return self._extract_agms_tags(clean_summary, company_name)
 
     def _summarize_single(self, transcript: str, company_name: str) -> str:
         prompt = f"""
@@ -295,7 +300,9 @@ Chunk summaries:
 
     def _summarize_single_pubex(self, transcript: str, company_name: str) -> str:
         prompt = f"""
-Summarize this Public Expose transcript into question-and-answer output for {company_name}.
+Summarize this Public Expose transcript for {company_name} into two sections:
+1) Company Update
+2) QnA
 
 Focus on sections such as:
 - Risalah Pertanyaan dan Jawaban
@@ -303,11 +310,17 @@ Focus on sections such as:
 - Pertanyaan / Question and Jawaban / Answer
 
 Return Markdown using exactly this format:
+Company Update:
+- <factual business/operational/financial update, concise but detailed>
+- <another factual update>
+
+QnA:
 Q&A #1: Q: <short question summary>. A: <short answer summary or Not stated>.
 Q&A #2: Q: ... A: ...
 Q&A #3: Q: ... A: ...
 
 Rules:
+- Company Update must include key factual updates (strategy, performance, outlook, operations, projects, financing, risks) from the transcript.
 - Include only factual Q&A content from the transcript.
 - If a question has no answer in the transcript, set answer to Not stated.
 - Keep each question and answer concise (max 1 sentence each).
@@ -322,9 +335,12 @@ Transcript:
     def _summarize_chunk_pubex(self, chunk: str, index: int, total: int) -> str:
         prompt = f"""
 You are summarizing chunk {index} of {total} of a long Public Expose transcript.
-Extract question-and-answer facts only.
+Extract company-update facts and question-and-answer facts only.
 
 Return concise Markdown with this format only:
+Company Update candidates:
+- Update: <factual update>; Evidence: <short factual note>
+
 Q&A candidates:
 - Q: <question summary or Not stated>; A: <answer summary or Not stated>; Evidence: <short factual note>
 
@@ -341,15 +357,21 @@ Chunk text:
 
     def _merge_summaries_pubex(self, partial_summaries: str, company_name: str) -> str:
         prompt = f"""
-Merge these chunk-level Public Expose Q&A summaries into one final Q&A report for {company_name}.
+Merge these chunk-level Public Expose summaries into one final report for {company_name}.
 Deduplicate repeated items and preserve factual wording.
 
 Return Markdown using exactly this format:
+Company Update:
+- <factual business/operational/financial update, concise but detailed>
+- <another factual update>
+
+QnA:
 Q&A #1: Q: <short question summary>. A: <short answer summary or Not stated>.
 Q&A #2: Q: ... A: ...
 Q&A #3: Q: ... A: ...
 
 Rules:
+- Keep Company Update factual, concise, and focused on material updates.
 - Keep each question and answer concise (max 1 sentence each).
 - Preserve factual accuracy from chunk summaries only.
 - If answer detail is missing, use Not stated.
@@ -357,8 +379,32 @@ Rules:
 
         Chunk summaries:
         {partial_summaries}
-""".strip()
+ """.strip()
         return self._chat(prompt)
+
+    def summarize_pubex_company_update_from_pages(
+        self,
+        page_extraction: str,
+    ) -> str:
+        prompt = f"""
+You are summarizing Company Update facts from a page-wise extraction of Public Expose slides.
+
+Return Markdown using exactly this format:
+- <factual business/operational/financial update, concise>
+- <another factual update>
+
+Rules:
+- Use only facts present in the extraction text.
+- Preserve numbers exactly as written.
+- Merge duplicate facts from different pages.
+- Keep each bullet concise and material.
+- Do not add headings, commentary, or Q&A content.
+- If no factual Company Update content is present, return exactly: Not stated.
+
+Page-wise extraction:
+{page_extraction}
+""".strip()
+        return _normalize_pubex_company_update_summary(self._chat(prompt))
 
     def _extract_agms_tags(self, clean_summary: str, company_name: str) -> list[str]:
         if not clean_summary.strip():
@@ -780,24 +826,83 @@ def _normalize_pubex_summary(summary: str) -> str:
         body = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", body)
         body = re.sub(r"\s*```$", "", body)
 
-    lines = [re.sub(r"^-+\s*", "", line).strip() for line in body.splitlines() if line.strip()]
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
     non_title_lines = [
         line
         for line in lines
         if not line.upper().startswith("PUBEX SUMMARY OF")
         and not line.upper().startswith("PUBLIC EXPOSE SUMMARY OF")
     ]
+    company_lines: list[str] = []
+    qa_lines: list[str] = []
+    in_company = False
+    in_qa = False
 
-    qa_lines = [
-        line
-        for line in non_title_lines
-        if re.match(r"^(Q\s*&\s*A|Q/A|QA)\s*#?\d+\s*:", line, flags=re.IGNORECASE)
-    ]
+    for line in non_title_lines:
+        normalized = line.strip()
+        if re.match(r"^company\s*update\s*:\s*$", normalized, flags=re.IGNORECASE):
+            in_company = True
+            in_qa = False
+            continue
+        if re.match(r"^(qna|q\s*&\s*a|q/a)\s*:\s*$", normalized, flags=re.IGNORECASE):
+            in_company = False
+            in_qa = True
+            continue
 
-    if qa_lines:
-        return "\n".join(qa_lines)
+        if in_company:
+            company_lines.append(re.sub(r"^-+\s*", "- ", normalized))
+            continue
+        if in_qa:
+            qa_lines.append(normalized)
+            continue
 
-    return "\n".join(non_title_lines)
+        if re.match(r"^(Q\s*&\s*A|Q/A|QA)\s*#?\d+\s*:", normalized, flags=re.IGNORECASE):
+            qa_lines.append(normalized)
+        else:
+            company_lines.append(re.sub(r"^-+\s*", "- ", normalized))
+
+    company_lines = [line for line in company_lines if line.strip()]
+    qa_lines = [line for line in qa_lines if line.strip()]
+
+    if not company_lines:
+        company_lines = ["- Not stated."]
+    if not qa_lines:
+        qa_lines = ["Q&A #1: Q: Not stated. A: Not stated."]
+
+    return "Company Update:\n" + "\n".join(company_lines) + "\n\nQnA:\n" + "\n".join(qa_lines)
+
+
+def _normalize_pubex_company_update_summary(summary: str) -> str:
+    body = summary.strip()
+    if not body:
+        return "Not stated."
+
+    if body.startswith("```"):
+        body = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", body)
+        body = re.sub(r"\s*```$", "", body)
+
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return "Not stated."
+
+    if len(lines) == 1 and lines[0].lower() in {"not stated", "not stated."}:
+        return "Not stated."
+
+    normalized: list[str] = []
+    for line in lines:
+        if line.lower() in {"not stated", "not stated."}:
+            continue
+        cleaned = re.sub(r"^[-*•]\s*", "- ", line)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned == "-":
+            continue
+        if not cleaned.startswith("- "):
+            cleaned = f"- {cleaned}"
+        normalized.append(cleaned)
+
+    if not normalized:
+        return "Not stated."
+    return "\n".join(normalized)
 
 
 def _normalize_tags(raw: str) -> list[str]:

@@ -18,6 +18,8 @@ def upsert_agm_summary(
     date: str,
     summary: str,
     tags: list[str] | None = None,
+    source_link: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Write one AGM summary/tags into idx_agm for an existing row."""
     return upsert_agm_summaries(
@@ -27,6 +29,8 @@ def upsert_agm_summary(
                 "agm_date": date,
                 "summary": summary,
                 "tags": tags or [],
+                "source_link": source_link,
+                "source_file": source_file,
             }
         ]
     )
@@ -58,12 +62,16 @@ def upsert_agm_summaries(rows: list[dict[str, object]]) -> tuple[int, int]:
     for row in rows:
         tags = row.get("tags")
         normalized_tags = [str(tag) for tag in tags] if isinstance(tags, list) else []
+        source_link = str(row.get("source_link", "")).strip()
+        source_file = str(row.get("source_file", "")).strip()
         normalized_rows.append(
             {
                 "symbol": str(row.get("symbol", "")),
                 "agm_date": str(row.get("agm_date", "")),
                 "summary": str(row.get("summary", "")),
                 "tags": normalized_tags,
+                "source_link": source_link,
+                "source_file": source_file,
             }
         )
 
@@ -120,6 +128,8 @@ def upsert_agm_summaries(rows: list[dict[str, object]]) -> tuple[int, int]:
                         "agm_date": row["agm_date"],
                         "summary": row["summary"],
                         "tags": row["tags"],
+                        "source_link": row["source_link"],
+                        "source_file": row["source_file"],
                         "updated_on": updated_on,
                     }
                 )
@@ -146,6 +156,93 @@ def upsert_agm_summaries(rows: list[dict[str, object]]) -> tuple[int, int]:
             [{k: v for k, v in row.items() if k != "__reason"}],
             reason=str(row.get("__reason", "Database update failed.")),
         )
+
+    skipped_total = len(missing_rows) + len(failed_updates)
+    return (updated_count, skipped_total)
+
+
+def upsert_agm_sources(rows: list[dict[str, object]]) -> tuple[int, int]:
+    """Update only source_link/source_file on existing AGMS rows."""
+    if not rows:
+        return (0, 0)
+
+    normalized_rows: list[dict[str, object]] = []
+    for row in rows:
+        normalized_rows.append(
+            {
+                "symbol": str(row.get("symbol", "")),
+                "agm_date": str(row.get("agm_date", "")),
+                "source_link": str(row.get("source_link", "")).strip(),
+                "source_file": str(row.get("source_file", "")).strip(),
+            }
+        )
+
+    supabase = get_supabase_client()
+    existing_pairs = _fetch_existing_pairs(supabase, normalized_rows)
+    updatable_rows = [
+        row
+        for row in normalized_rows
+        if (row["symbol"], row["agm_date"]) in existing_pairs
+    ]
+    missing_rows = [
+        row
+        for row in normalized_rows
+        if (row["symbol"], row["agm_date"]) not in existing_pairs
+    ]
+
+    resolved_rows: list[dict[str, object]] = []
+    unresolved_rows: list[dict[str, object]] = []
+    for row in missing_rows:
+        resolved_date = _find_fallback_agm_date(
+            supabase=supabase,
+            symbol=str(row["symbol"]),
+            agm_date=str(row["agm_date"]),
+            window_days=7,
+        )
+        if resolved_date is None:
+            unresolved_rows.append(row)
+            continue
+
+        resolved_rows.append({**row, "__match_agm_date": resolved_date})
+
+    updatable_rows.extend(resolved_rows)
+    missing_rows = unresolved_rows
+
+    if not updatable_rows:
+        return (0, len(missing_rows))
+
+    updated_count = 0
+    failed_updates: list[dict[str, object]] = []
+    updated_on = _current_utc_timestamptz()
+
+    for row in updatable_rows:
+        try:
+            response = (
+                supabase.table("idx_agm")
+                .update(
+                    {
+                        "source_link": row["source_link"],
+                        "source_file": row["source_file"],
+                        "updated_on": updated_on,
+                    }
+                )
+                .eq("symbol", row["symbol"])
+                .eq("agm_date", row.get("__match_agm_date", row["agm_date"]))
+                .execute()
+            )
+        except Exception as e:
+            failed_updates.append({**row, "__reason": f"Database update failed: {e}"})
+            continue
+
+        if response.data:
+            updated_count += 1
+        else:
+            failed_updates.append(
+                {
+                    **row,
+                    "__reason": "No row updated for (symbol, agm_date); source-only update skipped.",
+                }
+            )
 
     skipped_total = len(missing_rows) + len(failed_updates)
     return (updated_count, skipped_total)
